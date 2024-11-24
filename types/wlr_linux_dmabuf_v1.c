@@ -323,8 +323,7 @@ static void params_create_common(struct wl_resource *params_resource,
 			goto err_out;
 		}
 
-		if (attribs.offset[i] + attribs.stride[i] > size ||
-				attribs.stride[i] == 0) {
+		if (attribs.offset[i] + attribs.stride[i] > size) {
 			wl_resource_post_error(params_resource,
 				ZWP_LINUX_BUFFER_PARAMS_V1_ERROR_OUT_OF_BOUNDS,
 				"invalid stride %" PRIu32 " for plane %d",

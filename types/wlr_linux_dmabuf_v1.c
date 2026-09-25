@@ -811,6 +811,11 @@ static void linux_dmabuf_send_modifiers(struct wl_resource *resource,
 
 	for (size_t i = 0; i < fmt->len; i++) {
 		uint64_t mod = fmt->modifiers[i];
+		if (mod >> 56 == DRM_FORMAT_MOD_VENDOR_ARM &&
+				((mod >> 52) & 0xf) == DRM_FORMAT_MOD_ARM_TYPE_AFBC &&
+				(mod & (AFBC_FORMAT_MOD_TILED | AFBC_FORMAT_MOD_SC))) {
+			continue;
+		}
 		zwp_linux_dmabuf_v1_send_modifier(resource, fmt->format,
 			mod >> 32, mod & 0xFFFFFFFF);
 	}

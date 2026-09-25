@@ -175,17 +175,7 @@ static bool init_plane(struct wlr_drm_backend *drm,
 	p->props = props;
 	p->initial_crtc_id = drm_plane->crtc_id;
 
-	for (size_t i = 0; i < drm_plane->count_formats; ++i) {
-		// Force a LINEAR layout for the cursor if the driver doesn't support
-		// modifiers
-		wlr_drm_format_set_add(&p->formats, drm_plane->formats[i],
-			DRM_FORMAT_MOD_LINEAR);
-		if (type != DRM_PLANE_TYPE_CURSOR) {
-			wlr_drm_format_set_add(&p->formats, drm_plane->formats[i],
-				DRM_FORMAT_MOD_INVALID);
-		}
-	}
-
+	bool has_in_formats = false;
 	if (p->props.in_formats && drm->addfb2_modifiers) {
 		uint64_t blob_id;
 		if (!get_drm_prop(drm->fd, p->id, p->props.in_formats, &blob_id)) {
@@ -205,6 +195,22 @@ static bool init_plane(struct wlr_drm_backend *drm,
 		}
 
 		drmModeFreePropertyBlob(blob);
+		has_in_formats = true;
+	}
+
+	for (size_t i = 0; i < drm_plane->count_formats; ++i) {
+		if (has_in_formats && !wlr_drm_format_set_has(&p->formats,
+				drm_plane->formats[i], DRM_FORMAT_MOD_LINEAR)) {
+			continue;
+		}
+		// Force a LINEAR layout for the cursor if the driver doesn't support
+		// modifiers
+		wlr_drm_format_set_add(&p->formats, drm_plane->formats[i],
+			DRM_FORMAT_MOD_LINEAR);
+		if (type != DRM_PLANE_TYPE_CURSOR) {
+			wlr_drm_format_set_add(&p->formats, drm_plane->formats[i],
+				DRM_FORMAT_MOD_INVALID);
+		}
 	}
 
 	uint64_t size_hints_blob_id = 0;

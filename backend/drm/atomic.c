@@ -270,8 +270,10 @@ bool drm_atomic_connector_prepare(struct wlr_drm_connector_state *state, bool mo
 	}
 
 	uint32_t fb_damage_clips = 0;
+	struct wlr_drm_plane *damage_plane = state->primary_plane != NULL ?
+		state->primary_plane : crtc->primary;
 	if ((state->base->committed & WLR_OUTPUT_STATE_DAMAGE) &&
-			crtc->primary->props.fb_damage_clips != 0) {
+			damage_plane->props.fb_damage_clips != 0) {
 		create_fb_damage_clips_blob(drm, state->primary_fb->wlr_buf->width,
 			state->primary_fb->wlr_buf->height, &state->base->damage, &fb_damage_clips);
 	}
@@ -438,14 +440,20 @@ static void atomic_connector_add(struct atomic *atom,
 			atomic_add(atom, crtc->id, crtc->props.vrr_enabled, state->vrr_enabled);
 		}
 
-		set_plane_props(atom, drm, crtc->primary, state->primary_fb, crtc->id,
+		struct wlr_drm_plane *primary = state->primary_plane != NULL ?
+			state->primary_plane : crtc->primary;
+		set_plane_props(atom, drm, primary, state->primary_fb, crtc->id,
 			&state->primary_viewport.dst_box, &state->primary_viewport.src_box);
-		if (crtc->primary->props.fb_damage_clips != 0) {
-			atomic_add(atom, crtc->primary->id,
-				crtc->primary->props.fb_damage_clips, state->fb_damage_clips);
+		if (primary->props.fb_damage_clips != 0) {
+			atomic_add(atom, primary->id,
+				primary->props.fb_damage_clips, state->fb_damage_clips);
 		}
 		if (state->primary_in_fence_fd >= 0) {
-			set_plane_in_fence_fd(atom, crtc->primary, state->primary_in_fence_fd);
+			set_plane_in_fence_fd(atom, primary, state->primary_in_fence_fd);
+		}
+		if (crtc->primary_alt != NULL) {
+			plane_disable(atom, primary == crtc->primary ?
+				crtc->primary_alt : crtc->primary);
 		}
 		if (state->base->committed & WLR_OUTPUT_STATE_SIGNAL_TIMELINE) {
 			set_crtc_out_fence_ptr(atom, crtc, &state->out_fence_fd);
@@ -476,6 +484,9 @@ static void atomic_connector_add(struct atomic *atom,
 		}
 	} else {
 		plane_disable(atom, crtc->primary);
+		if (crtc->primary_alt != NULL) {
+			plane_disable(atom, crtc->primary_alt);
+		}
 		if (crtc->cursor) {
 			plane_disable(atom, crtc->cursor);
 		}

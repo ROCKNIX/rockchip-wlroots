@@ -174,6 +174,7 @@ static bool init_plane(struct wlr_drm_backend *drm,
 	p->id = id;
 	p->props = props;
 	p->initial_crtc_id = drm_plane->crtc_id;
+	p->possible_crtcs = drm_plane->possible_crtcs;
 
 	bool has_in_formats = false;
 	if (p->props.in_formats && drm->addfb2_modifiers) {
@@ -265,6 +266,54 @@ static bool init_plane(struct wlr_drm_backend *drm,
 	return true;
 }
 
+static bool plane_is_afbc_only(const struct wlr_drm_plane *plane) {
+	if (plane->formats.len == 0) {
+		return false;
+	}
+	for (size_t i = 0; i < plane->formats.len; i++) {
+		const struct wlr_drm_format *fmt = &plane->formats.formats[i];
+		if (fmt->len == 0) {
+			return false;
+		}
+		for (size_t j = 0; j < fmt->len; j++) {
+			uint64_t mod = fmt->modifiers[j];
+			if (mod >> 56 != DRM_FORMAT_MOD_VENDOR_ARM ||
+					((mod >> 52) & 0xf) != DRM_FORMAT_MOD_ARM_TYPE_AFBC) {
+				return false;
+			}
+		}
+	}
+	return true;
+}
+
+static void init_afbc_alt_primaries(struct wlr_drm_backend *drm) {
+	if (!env_parse_bool("WLR_DRM_AFBC_ALT_PRIMARY")) {
+		return;
+	}
+	for (size_t i = 0; i < drm->num_crtcs; i++) {
+		struct wlr_drm_crtc *crtc = &drm->crtcs[i];
+		for (size_t j = 0; j < drm->num_planes && crtc->primary != NULL &&
+				crtc->primary_alt == NULL; j++) {
+			struct wlr_drm_plane *plane = &drm->planes[j];
+			if (plane->type != DRM_PLANE_TYPE_OVERLAY ||
+					!(plane->possible_crtcs & (1u << i)) ||
+					!plane_is_afbc_only(plane)) {
+				continue;
+			}
+			bool taken = false;
+			for (size_t k = 0; k < i; k++) {
+				taken = taken || drm->crtcs[k].primary_alt == plane;
+			}
+			if (!taken) {
+				crtc->primary_alt = plane;
+				wlr_log(WLR_INFO, "CRTC %"PRIu32": plane %"PRIu32
+					" scans out AFBC only, using it as alternate primary",
+					crtc->id, plane->id);
+			}
+		}
+	}
+}
+
 static bool init_planes(struct wlr_drm_backend *drm) {
 	drmModePlaneRes *plane_res = drmModeGetPlaneResources(drm->fd);
 	if (!plane_res) {
@@ -298,6 +347,7 @@ static bool init_planes(struct wlr_drm_backend *drm) {
 		drmModeFreePlane(drm_plane);
 	}
 
+	init_afbc_alt_primaries(drm);
 	drmModeFreePlaneResources(plane_res);
 	return true;
 
@@ -395,6 +445,7 @@ void finish_drm_resources(struct wlr_drm_backend *drm) {
 		if (crtc->gamma_lut) {
 			drmModeDestroyPropertyBlob(drm->fd, crtc->gamma_lut);
 		}
+		wlr_drm_format_set_finish(&crtc->primary_formats);
 	}
 
 	free(drm->crtcs);
@@ -560,8 +611,11 @@ static void drm_connector_apply_commit(const struct wlr_drm_connector_state *sta
 	struct wlr_drm_connector *conn = state->connector;
 	struct wlr_drm_crtc *crtc = conn->crtc;
 
-	drm_fb_copy(&crtc->primary->queued_fb, state->primary_fb);
-	crtc->primary->viewport = state->primary_viewport;
+	struct wlr_drm_plane *primary = state->primary_plane != NULL ?
+		state->primary_plane : crtc->primary;
+	drm_fb_copy(&primary->queued_fb, state->primary_fb);
+	primary->viewport = state->primary_viewport;
+	crtc->active_primary = primary;
 	if (crtc->cursor != NULL) {
 		drm_fb_copy(&crtc->cursor->queued_fb, state->cursor_fb);
 	}
@@ -580,6 +634,10 @@ static void drm_connector_apply_commit(const struct wlr_drm_connector_state *sta
 
 	if (!state->active) {
 		drm_plane_finish_surface(crtc->primary);
+		if (crtc->primary_alt != NULL) {
+			drm_plane_finish_surface(crtc->primary_alt);
+		}
+		crtc->active_primary = NULL;
 		drm_plane_finish_surface(crtc->cursor);
 		drm_fb_clear(&conn->cursor_pending_fb);
 
@@ -685,7 +743,9 @@ static void drm_connector_state_init(struct wlr_drm_connector_state *state,
 		// The CRTC must be set up before this function is called
 		assert(conn->crtc != NULL);
 
-		struct wlr_drm_plane *primary = conn->crtc->primary;
+		struct wlr_drm_plane *primary = conn->crtc->active_primary != NULL ?
+			conn->crtc->active_primary : conn->crtc->primary;
+		state->primary_plane = primary;
 		if (primary->queued_fb != NULL) {
 			state->primary_fb = drm_fb_lock(primary->queued_fb);
 			state->primary_viewport = primary->viewport;
@@ -725,6 +785,15 @@ static bool drm_connector_state_update_primary_fb(struct wlr_drm_connector *conn
 
 	struct wlr_drm_plane *plane = crtc->primary;
 	struct wlr_buffer *source_buf = state->base->buffer;
+	if (crtc->primary_alt != NULL) {
+		struct wlr_dmabuf_attributes attribs;
+		if (wlr_buffer_get_dmabuf(source_buf, &attribs) &&
+				wlr_drm_format_set_has(&crtc->primary_alt->formats,
+					attribs.format, attribs.modifier)) {
+			plane = crtc->primary_alt;
+		}
+	}
+	state->primary_plane = plane;
 
 	struct wlr_drm_syncobj_timeline *wait_timeline = NULL;
 	uint64_t wait_point = 0;
@@ -1276,7 +1345,16 @@ static const struct wlr_drm_format_set *drm_connector_get_primary_formats(
 	if (conn->backend->mgpu_renderer.wlr_rend) {
 		return &conn->backend->mgpu_formats;
 	}
-	return &conn->crtc->primary->formats;
+	struct wlr_drm_crtc *crtc = conn->crtc;
+	if (crtc->primary_alt != NULL) {
+		if (crtc->primary_formats.len == 0 &&
+				!wlr_drm_format_set_union(&crtc->primary_formats,
+					&crtc->primary->formats, &crtc->primary_alt->formats)) {
+			return &crtc->primary->formats;
+		}
+		return &crtc->primary_formats;
+	}
+	return &crtc->primary->formats;
 }
 
 static const struct wlr_output_impl output_impl = {
@@ -2017,9 +2095,16 @@ static void handle_page_flip(int fd, unsigned seq,
 		return;
 	}
 
-	struct wlr_drm_plane *plane = conn->crtc->primary;
+	struct wlr_drm_plane *plane = conn->crtc->active_primary != NULL ?
+		conn->crtc->active_primary : conn->crtc->primary;
 	if (plane->queued_fb) {
 		drm_fb_move(&plane->current_fb, &plane->queued_fb);
+	}
+	if (conn->crtc->primary_alt != NULL) {
+		struct wlr_drm_plane *other = plane == conn->crtc->primary ?
+			conn->crtc->primary_alt : conn->crtc->primary;
+		drm_fb_clear(&other->queued_fb);
+		drm_fb_clear(&other->current_fb);
 	}
 	if (conn->crtc->cursor && conn->crtc->cursor->queued_fb) {
 		drm_fb_move(&conn->crtc->cursor->current_fb,

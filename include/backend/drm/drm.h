@@ -42,6 +42,7 @@ struct wlr_drm_plane {
 	struct wlr_drm_plane_props props;
 
 	uint32_t initial_crtc_id;
+	uint32_t possible_crtcs;
 	struct liftoff_plane *liftoff;
 	struct liftoff_layer *liftoff_layer;
 };
@@ -80,6 +81,9 @@ struct wlr_drm_crtc {
 
 	struct wlr_drm_plane *primary;
 	struct wlr_drm_plane *cursor;
+	struct wlr_drm_plane *primary_alt;
+	struct wlr_drm_plane *active_primary;
+	struct wlr_drm_format_set primary_formats;
 
 	struct wlr_drm_crtc_props props;
 };
@@ -147,6 +151,7 @@ struct wlr_drm_connector_state {
 	drmModeModeInfo mode;
 	struct wlr_drm_fb *primary_fb;
 	struct wlr_drm_viewport primary_viewport;
+	struct wlr_drm_plane *primary_plane;
 	struct wlr_drm_fb *cursor_fb;
 
 	struct wlr_drm_syncobj_timeline *wait_timeline;
